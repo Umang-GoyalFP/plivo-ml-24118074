@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>2,000 Step LLM Speedrun — Summary</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; line-height: 1.55; }
+  h1 { font-size: 1.7rem; margin-bottom: 4px; }
+  h2 { font-size: 1.2rem; margin-top: 2.2rem; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 0.92rem; }
+  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+  th { background: #f4f4f4; }
+  .best { background: #e9f9ee; font-weight: 600; }
+  .worse { color: #a33; }
+  code { background: #f2f2f2; padding: 1px 5px; border-radius: 3px; font-size: 0.9em; }
+  .note { background: #fff8e6; border: 1px solid #f0d98c; padding: 10px 14px; border-radius: 6px; font-size: 0.92rem; }
+  .flag { background: #fdecec; border: 1px solid #e6b3b3; padding: 10px 14px; border-radius: 6px; font-size: 0.92rem; }
+</style>
+</head>
+<body>
+
+<h1>2,000 Step LLM Speedrun — Summary</h1>
+<p>Final dev bpb: <b>1.9588</b> (baseline 2.3718) &middot; params: <b>1,503,680</b> / 2,000,000 cap &middot; steps: <b>2000</b> / 2000 cap.</p>
+
+<h2>Final architecture &amp; config</h2>
+<table>
+<tr><th>Component</th><th>Baseline</th><th>Final</th></tr>
+<tr><td>Tokenizer</td><td>byte-level (vocab 256)</td><td>BPE trained on train_corpus.txt (vocab 768), lossless byte fallback</td></tr>
+<tr><td>Optimizer</td><td>Adam, constant lr 3e-4</td><td>AdamW, lr 8e-4, warmup 50, cosine decay, weight_decay 0.01, grad clip 1.0</td></tr>
+<tr><td>Batch size</td><td>8</td><td>increased (see RUNLOG ckpt6)</td></tr>
+<tr><td>Positional encoding</td><td>learned absolute</td><td>learned absolute (RoPE tried, reverted)</td></tr>
+<tr><td>Weight tying</td><td>off</td><td>off (tried on, reverted)</td></tr>
+<tr><td>Init</td><td>flat normal std=0.05</td><td>flat normal std=0.05 (scaled init tried, reverted)</td></tr>
+<tr><td>block_size</td><td>128</td><td>128 (increase tried, reverted)</td></tr>
+</table>
+
+<h2>Why this configuration</h2>
+<p>Under a fixed 2,000-step cap, the only two levers that increase effective training signal rather than compete for a fixed share of it are: <b>more real content per token</b> (BPE tokenizer shrinks Devanagari sequences, so each block_size window covers more actual text) and <b>more tokens per step</b> (bigger batch raises steps &times; batch = total tokens seen, with lower gradient noise). Every other change tried — weight tying, scaled init, RoPE, larger block_size — is a longer-horizon bet that needs more than 2,000 steps to recover its own instability cost, so each lost to the simpler baseline choice at this step count.</p>
+
+<h2>Full experiment log</h2>
+<table>
+<tr><th>Run</th><th>Change</th><th>Dev bpb</th><th>Result</th></tr>
+<tr><td>Baseline</td><td>— (starter code)</td><td>2.3718</td><td>—</td></tr>
+<tr><td>ckpt1</td><td>Tokenizer → BPE (vocab 512)</td><td>2.2417</td><td>kept</td></tr>
+<tr><td>ckpt2</td><td>AdamW + cosine schedule, default hparams (lr 3e-4, wd 0.1, warmup 100)</td><td class="worse">2.3632</td><td>regressed — bad hparams for 2000-step budget</td></tr>
+<tr><td>ckpt2b</td><td>Same schedule, retuned: lr 8e-4, wd 0.01, warmup 50</td><td>2.1772</td><td>kept (best at the time)</td></tr>
+<tr><td>ckpt3</td><td>Weight tying + init change, combined</td><td class="worse">2.3072</td><td>regressed — two interacting changes, couldn't isolate cause</td></tr>
+<tr><td>ckpt3a</td><td>Weight tying only</td><td class="worse">2.2627</td><td>regressed — dropped</td></tr>
+<tr><td>ckpt3b</td><td>Init change only</td><td class="worse">2.2647</td><td>regressed — dropped</td></tr>
+<tr><td>ckpt4</td><td>block_size increase</td><td class="worse">2.2908</td><td>regressed, 2x slower/step — dropped</td></tr>
+<tr><td>ckpt5</td><td>RoPE positional encoding</td><td class="worse">2.3084</td><td>regressed — dropped</td></tr>
+<tr><td>ckpt6</td><td>Batch size increase</td><td class="best">1.9687</td><td>kept — largest single win</td></tr>
+<tr><td>ckpt7 (final)</td><td>Vocab_size 512 → 768, on top of ckpt6</td><td class="best">1.9588</td><td>kept — final submission</td></tr>
+</table>
+
+<h2>Why the failed runs failed</h2>
+<ul>
+<li><b>ckpt2 (first schedule attempt):</b> ran with default args instead of tuned ones. Cosine decay from an unraised peak lr lowers the <i>average</i> lr across training below the constant baseline; weight_decay 0.1 is calibrated for training runs far longer than 2000 steps and dragged weights toward zero faster than gradients could shape them.</li>
+<li><b>Weight tying (ckpt3, ckpt3a):</b> tying head and tok_emb forces one matrix to serve two conflicting roles — clustering similar inputs vs. separating outputs for confident logits. 2000 steps isn't enough to resolve that tension.</li>
+<li><b>Scaled init (ckpt3, ckpt3b):</b> depth-scaled/GPT-2-style init is designed for much longer training; it's undertrained relative to the flat std=0.05 baseline at this step count.</li>
+<li><b>Larger block_size (ckpt4):</b> more pos_emb params and compute per step, but the corpus/step budget is too short to actually learn to exploit the extra context — wasted capacity, plus 2x slower steps.</li>
+<li><b>RoPE (ckpt5):</b> has no learned parameters — the model must learn relative-position use implicitly through Q/K dot products, which converges slower than a directly learnable pos_emb table. RoPE's real advantage (long-range generalization) never gets time to pay off in 2000 steps at block_size 128.</li>
+</ul>
+
+<h2>Why this order of experiments</h2>
+<p>Architecture/optimizer/init/tying/RoPE/block_size changes were tested first because they're cheap (~75&ndash;165ms/step) to try and discard. Batch size and vocab_size increases were saved for last and applied once, on top of the already-best config, because both raise ms/step for every run from that point forward — testing them early would have taxed the time budget of every subsequent experiment. Both were fairly high-confidence wins going in, which is also why they were treated as the closing moves rather than early exploration.</p>
+
+<div class="flag">
+<b>To fill in before submitting:</b> exact human vs. machine split — e.g. which changes were authored/proposed by an AI coding assistant vs. decided/written by hand, and which runs' hyperparameters were agent-suggested vs. manually tuned. This summary was assembled by an AI assistant from your run logs and your own stated reasoning; the assignment requires you to state this breakdown explicitly.
+</div>
+
+</body>
+</html>
